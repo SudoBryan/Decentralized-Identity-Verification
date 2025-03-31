@@ -169,3 +169,99 @@
     proof-hash: (buff 32)
   }
 )
+;; Read-only functions
+
+;; Get identity details
+(define-read-only (get-identity (identity-id uint))
+  (map-get? identities { identity-id: identity-id })
+)
+
+;; Get identity by principal
+(define-read-only (get-identity-by-principal (user-principal principal))
+  (match (map-get? principal-to-identity { principal: user-principal })
+    identity-mapping (map-get? identities { identity-id: (get identity-id identity-mapping) })
+    none
+  )
+)
+
+;; Get provider details
+(define-read-only (get-provider (provider-id uint))
+  (map-get? identity-providers { provider-id: provider-id })
+)
+
+;; Get provider by principal
+(define-read-only (get-provider-by-principal (provider-principal principal))
+  (match (map-get? provider-principals { principal: provider-principal })
+    provider-mapping (map-get? identity-providers { provider-id: (get provider-id provider-mapping) })
+    none
+  )
+)
+
+;; Get credential details
+(define-read-only (get-credential (credential-id uint))
+  (map-get? credentials { credential-id: credential-id })
+)
+
+;; Check if a credential is valid
+(define-read-only (is-credential-valid (credential-id uint))
+  (match (map-get? credentials { credential-id: credential-id })
+    credential
+    (and
+      (is-eq (get status credential) VERIFICATION-STATUS-APPROVED)
+      (is-none (get revoked-at credential))
+      (match (get expires-at credential)
+        expiry (< block-height expiry)
+        true ;; No expiry set, still valid
+      )
+    )
+    false
+  )
+)
+
+;; Verify age without revealing exact age
+(define-read-only (verify-age-over (identity-id uint) (age-threshold uint))
+  (match (map-get? age-proofs { identity-id: identity-id })
+    age-proof
+    (cond
+      ((and (is-eq age-threshold u18) (get age-over-18 age-proof)) (ok true))
+      ((and (is-eq age-threshold u21) (get age-over-21 age-proof)) (ok true))
+      ((and (is-eq age-threshold u65) (get age-over-65 age-proof)) (ok true))
+      (true (ok false))
+    )
+    (err ERR-CREDENTIAL-NOT-FOUND)
+  )
+)
+
+;; Get reputation score in a specific context
+(define-read-only (get-reputation (identity-id uint) (context (string-utf8 50)))
+  (map-get? reputation-scores { identity-id: identity-id, context: context })
+)
+
+;; Check if disclosure is authorized for a specific credential type
+(define-read-only (is-disclosure-authorized (identity-id uint) (requestor principal) (credential-type uint))
+  (match (map-get? disclosure-authorizations { identity-id: identity-id, authorized-principal: requestor })
+    auth
+    (and
+      ;; Check if authorization hasn't expired
+      (match (get expires-at auth)
+        expiry (< block-height expiry)
+        true ;; No expiry set
+      )
+      ;; Check if credential type is in authorized list
+      (is-some (index-of (get authorized-types auth) credential-type))
+    )
+    false
+  )
+)
+
+;; Verify an attribute without revealing it (zero-knowledge)
+(define-read-only (verify-attribute-match 
+  (identity-id uint) 
+  (attribute-name (string-ascii 64)) 
+  (expected-hash (buff 32))
+)
+  (match (map-get? committed-attributes { identity-id: identity-id, attribute-name: attribute-name })
+    attribute (is-eq (get attribute-hash attribute) expected-hash)
+    false
+  )
+)
