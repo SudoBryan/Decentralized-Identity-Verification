@@ -74,3 +74,98 @@
     metadata-uri: (optional (string-utf8 255)) ;; Optional URI to additional metadata
   }
 )
+;; Mapping principal to identity ID
+(define-map principal-to-identity
+  { principal: principal }
+  { identity-id: uint }
+)
+
+;; Mapping for identity credentials
+(define-map credentials
+  { credential-id: uint }
+  {
+    identity-id: uint,
+    credential-type: uint,
+    issuer-id: uint,
+    issued-at: uint,
+    expires-at: (optional uint),
+    revoked-at: (optional uint),
+    credential-hash: (buff 32), ;; Hash of the actual credential data (stored off-chain)
+    verification-proof: (buff 512), ;; ZK proof or signature
+    status: uint
+  }
+)
+
+;; Mapping for identity credentials by type
+(define-map identity-credentials-by-type
+  { identity-id: uint, credential-type: uint, index: uint }
+  { credential-id: uint }
+)
+
+;; Mapping for credential count by type for an identity
+(define-map identity-credential-counts
+  { identity-id: uint, credential-type: uint }
+  { count: uint }
+)
+
+;; Mapping for credential verifications (attestations)
+(define-map verifications
+  { verification-id: uint }
+  {
+    credential-id: uint,
+    verifier-id: uint, ;; provider ID who verified
+    verified-at: uint,
+    verification-proof: (buff 512),
+    verification-status: uint,
+    verification-expiry: (optional uint)
+  }
+)
+
+;; Mapping for disclosure authorizations
+(define-map disclosure-authorizations
+  { identity-id: uint, authorized-principal: principal }
+  {
+    authorized-at: uint,
+    expires-at: (optional uint),
+    authorized-types: (list 10 uint), ;; List of credential types authorized for disclosure
+    authorization-proof: (buff 128) ;; Signature by identity owner
+  }
+)
+
+;; Mapping for reputation scores
+(define-map reputation-scores
+  { identity-id: uint, context: (string-utf8 50) }
+  {
+    score: uint, ;; 0-100 scale
+    updated-at: uint,
+    attestation-count: uint,
+    confidence-score: uint, ;; 0-100 scale
+    proof-hash: (buff 32) ;; Hash of all attestations that contributed to score
+  }
+)
+
+;; Mapping for committed attributes (hashed)
+;; Allows verification without revealing the actual data
+(define-map committed-attributes
+  { identity-id: uint, attribute-name: (string-ascii 64) }
+  {
+    attribute-hash: (buff 32),
+    commitment: (buff 64),
+    salt: (buff 32),
+    updated-at: uint
+  }
+)
+
+;; Mapping for age proofs
+(define-map age-proofs
+  { identity-id: uint }
+  {
+    age-over-18: bool,
+    age-over-21: bool,
+    age-over-65: bool,
+    proof-issuer: uint,
+    issued-at: uint,
+    expires-at: (optional uint),
+    proof-hash: (buff 32)
+  }
+)
