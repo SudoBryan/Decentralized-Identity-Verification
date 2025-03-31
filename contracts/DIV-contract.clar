@@ -630,3 +630,68 @@
       (provider-id (get provider-id provider-mapping))
       (verification-id (var-get next-verification-id))
     )
+  ;; Check if credential is not already revoked
+    (asserts! (is-none (get revoked-at credential)) (err ERR-REVOKED-CREDENTIAL))
+    
+    ;; Check if credential is not expired
+    (match (get expires-at credential)
+      expiry (asserts! (< block-height expiry) (err ERR-EXPIRED-CREDENTIAL))
+      true
+    )
+    
+    ;; Create verification record
+    (map-set verifications
+      { verification-id: verification-id }
+      {
+        credential-id: credential-id,
+        verifier-id: provider-id,
+        verified-at: block-height,
+        verification-proof: verification-proof,
+        verification-status: VERIFICATION-STATUS-APPROVED,
+        verification-expiry: (some (+ block-height u10950)) ;; Valid for ~3 months (assuming ~1 block/min)
+      }
+    )
+    
+    ;; Increment verification ID
+    (var-set next-verification-id (+ verification-id u1))
+    
+    (ok verification-id)
+  )
+)
+
+;; Request disclosure of specific identity attributes
+;; This function simulates a request - in reality, this would trigger an off-chain flow
+(define-public (request-disclosure (identity-id uint) (requested-types (list 10 uint)))
+  (let
+    (
+      (identity (unwrap! (get-identity identity-id) (err ERR-IDENTITY-NOT-FOUND)))
+    )
+    
+    ;; Check if disclosure is authorized
+    (asserts! 
+      (fold check-all-types-authorized requested-types true)
+      (err ERR-DISCLOSURE-NOT-AUTHORIZED)
+    )
+    
+    ;; This would trigger an off-chain notification/flow
+    ;; Return success to simulate
+    (ok true)
+  )
+)
+
+;; Helper function to check if all requested types are authorized
+(define-private (check-all-types-authorized (credential-type uint) (all-authorized bool))
+  (if all-authorized
+    (is-disclosure-authorized identity-id tx-sender credential-type)
+    false
+  )
+)
+
+;; Transfer ownership of the contract
+(define-public (transfer-ownership (new-owner principal))
+  (begin
+    (asserts! (is-eq tx-sender (var-get contract-owner)) (err ERR-NOT-AUTHORIZED))
+    (var-set contract-owner new-owner)
+    (ok true)
+  )
+)
