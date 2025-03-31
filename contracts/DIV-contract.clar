@@ -265,3 +265,433 @@
     false
   )
 )
+;; Public functions
+
+;; Register a new identity provider
+(define-public (register-provider
+  (name (string-utf8 100))
+  (provider-public-key (buff 33))
+  (provider-url (string-utf8 255))
+  (provider-type (string-utf8 50))
+)
+  (let
+    (
+      (provider-id (var-get next-provider-id))
+    )
+    
+    ;; Only contract owner can register providers
+    (asserts! (is-eq tx-sender (var-get contract-owner)) (err ERR-NOT-AUTHORIZED))
+    
+    ;; Create provider record
+    (map-set identity-providers
+      { provider-id: provider-id }
+      {
+        name: name,
+        provider-principal: tx-sender,
+        provider-public-key: provider-public-key,
+        provider-url: provider-url,
+        trust-score: u50, ;; Default initial score
+        provider-type: provider-type,
+        is-active: true,
+        registered-at: block-height
+      }
+    )
+    
+    ;; Map provider principal to ID
+    (map-set provider-principals
+      { principal: tx-sender }
+      { provider-id: provider-id }
+    )
+    
+    ;; Increment provider ID
+    (var-set next-provider-id (+ provider-id u1))
+    
+    (ok provider-id)
+  )
+)
+
+;; Create a new digital identity
+(define-public (create-identity (identity-hash (buff 32)) (metadata-uri (optional (string-utf8 255))))
+  (let
+    (
+      (identity-id (var-get next-identity-id))
+    )
+    
+    ;; Check if principal already has an identity
+    (asserts! (is-none (map-get? principal-to-identity { principal: tx-sender })) (err ERR-ALREADY-EXISTS))
+    
+    ;; Create identity
+    (map-set identities
+      { identity-id: identity-id }
+      {
+        owner: tx-sender,
+        identity-hash: identity-hash,
+        created-at: block-height,
+        updated-at: block-height,
+        is-active: true,
+        verification-level: u1, ;; Initial level
+        metadata-uri: metadata-uri
+      }
+    )
+    
+    ;; Map principal to identity
+    (map-set principal-to-identity
+      { principal: tx-sender }
+      { identity-id: identity-id }
+    )
+    
+    ;; Increment identity ID
+    (var-set next-identity-id (+ identity-id u1))
+    
+    (ok identity-id)
+  )
+)
+
+;; Issue a credential to an identity
+(define-public (issue-credential
+  (identity-id uint)
+  (credential-type uint)
+  (credential-hash (buff 32))
+  (verification-proof (buff 512))
+  (expires-at (optional uint))
+)
+  (let
+    (
+      (credential-id (var-get next-credential-id))
+      (identity (unwrap! (get-identity identity-id) (err ERR-IDENTITY-NOT-FOUND)))
+      (provider-mapping (unwrap! (map-get? provider-principals { principal: tx-sender }) (err ERR-PROVIDER-NOT-FOUND)))
+      (provider-id (get provider-id provider-mapping))
+      (provider (unwrap! (get-provider provider-id) (err ERR-PROVIDER-NOT-FOUND)))
+    )
+    
+    ;; Check if provider is active
+    (asserts! (get is-active provider) (err ERR-NOT-AUTHORIZED))
+    
+    ;; Create credential
+    (map-set credentials
+      { credential-id: credential-id }
+      {
+        identity-id: identity-id,
+        credential-type: credential-type,
+        issuer-id: provider-id,
+        issued-at: block-height,
+        expires-at: expires-at,
+        revoked-at: none,
+        credential-hash: credential-hash,
+        verification-proof: verification-proof,
+        status: VERIFICATION-STATUS-APPROVED
+      }
+    )
+    
+    ;; Update credential count and index
+    (match (map-get? identity-credential-counts { identity-id: identity-id, credential-type: credential-type })
+      existing-count
+      (let
+        (
+          (new-count (+ (get count existing-count) u1))
+        )
+        ;; Update count
+        (map-set identity-credential-counts
+          { identity-id: identity-id, credential-type: credential-type }
+          { count: new-count }
+        )
+        
+        ;; Add to index
+        (map-set identity-credentials-by-type
+          { identity-id: identity-id, credential-type: credential-type, index: (- new-count u1) }
+          { credential-id: credential-id }
+        )
+      )
+      ;; First credential of this type
+      (begin
+        (map-set identity-credential-counts
+          { identity-id: identity-id, credential-type: credential-type }
+          { count: u1 }
+        )
+        
+        (map-set identity-credentials-by-type
+          { identity-id: identity-id, credential-type: credential-type, index: u0 }
+          { credential-id: credential-id }
+        )
+      )
+    )
+    
+    ;; Increment credential ID
+    (var-set next-credential-id (+ credential-id u1))
+    
+    (ok credential-id)
+  )
+)
+;; Issue a zero-knowledge age proof
+(define-public (issue-age-proof
+  (identity-id uint)
+  (age-over-18 bool)
+  (age-over-21 bool)
+  (age-over-65 bool)
+  (proof-hash (buff 32))
+  (expires-at (optional uint))
+)
+  (let
+    (
+      (identity (unwrap! (get-identity identity-id) (err ERR-IDENTITY-NOT-FOUND)))
+      (provider-mapping (unwrap! (map-get? provider-principals { principal: tx-sender }) (err ERR-PROVIDER-NOT-FOUND)))
+      (provider-id (get provider-id provider-mapping))
+      (provider (unwrap! (get-provider provider-id) (err ERR-PROVIDER-NOT-FOUND)))
+    )
+    
+    ;; Check if provider is active
+    (asserts! (get is-active provider) (err ERR-NOT-AUTHORIZED))
+    
+    ;; Create or update age proof
+    (map-set age-proofs
+      { identity-id: identity-id }
+      {
+        age-over-18: age-over-18,
+        age-over-21: age-over-21,
+        age-over-65: age-over-65,
+        proof-issuer: provider-id,
+        issued-at: block-height,
+        expires-at: expires-at,
+        proof-hash: proof-hash
+      }
+    )
+    
+    (ok true)
+  )
+)
+
+;; Revoke a credential
+(define-public (revoke-credential (credential-id uint))
+  (let
+    (
+      (credential (unwrap! (map-get? credentials { credential-id: credential-id }) (err ERR-CREDENTIAL-NOT-FOUND)))
+      (provider-mapping (unwrap! (map-get? provider-principals { principal: tx-sender }) (err ERR-PROVIDER-NOT-FOUND)))
+      (provider-id (get provider-id provider-mapping))
+    )
+    
+    ;; Check if caller is the issuer of the credential
+    (asserts! (is-eq (get issuer-id credential) provider-id) (err ERR-NOT-AUTHORIZED))
+    
+    ;; Update credential status
+    (map-set credentials
+      { credential-id: credential-id }
+      (merge credential {
+        status: VERIFICATION-STATUS-REVOKED,
+        revoked-at: (some block-height)
+      })
+    )
+    
+    (ok true)
+  )
+)
+
+;; Commit an attribute for zero-knowledge verification
+(define-public (commit-attribute
+  (identity-id uint)
+  (attribute-name (string-ascii 64))
+  (attribute-hash (buff 32))
+  (commitment (buff 64))
+  (salt (buff 32))
+)
+  (let
+    (
+      (identity (unwrap! (get-identity identity-id) (err ERR-IDENTITY-NOT-FOUND)))
+    )
+    
+    ;; Check if caller is the identity owner
+    (asserts! (is-eq tx-sender (get owner identity)) (err ERR-NOT-AUTHORIZED))
+    
+    ;; Set or update committed attribute
+    (map-set committed-attributes
+      { identity-id: identity-id, attribute-name: attribute-name }
+      {
+        attribute-hash: attribute-hash,
+        commitment: commitment,
+        salt: salt,
+        updated-at: block-height
+      }
+    )
+    
+    (ok true)
+  )
+)
+
+;; Authorize selective disclosure to a specific party
+(define-public (authorize-disclosure
+  (identity-id uint)
+  (authorized-principal principal)
+  (authorized-types (list 10 uint))
+  (expires-at (optional uint))
+  (authorization-proof (buff 128))
+)
+  (let
+    (
+      (identity (unwrap! (get-identity identity-id) (err ERR-IDENTITY-NOT-FOUND)))
+    )
+    
+    ;; Check if caller is the identity owner
+    (asserts! (is-eq tx-sender (get owner identity)) (err ERR-NOT-AUTHORIZED))
+    
+    ;; Create or update disclosure authorization
+    (map-set disclosure-authorizations
+      { identity-id: identity-id, authorized-principal: authorized-principal }
+      {
+        authorized-at: block-height,
+        expires-at: expires-at,
+        authorized-types: authorized-types,
+        authorization-proof: authorization-proof
+      }
+    )
+    
+    (ok true)
+  )
+)
+
+;; Revoke disclosure authorization
+(define-public (revoke-disclosure-authorization (identity-id uint) (authorized-principal principal))
+  (let
+    (
+      (identity (unwrap! (get-identity identity-id) (err ERR-IDENTITY-NOT-FOUND)))
+    )
+    
+    ;; Check if caller is the identity owner
+    (asserts! (is-eq tx-sender (get owner identity)) (err ERR-NOT-AUTHORIZED))
+    
+    ;; Remove disclosure authorization
+    (map-delete disclosure-authorizations { identity-id: identity-id, authorized-principal: authorized-principal })
+    
+    (ok true)
+  )
+)
+
+;; Submit a reputation attestation
+(define-public (submit-reputation-attestation
+  (identity-id uint)
+  (context (string-utf8 50))
+  (score-change int)
+  (attestation-proof (buff 128))
+)
+  (let
+    (
+      (identity (unwrap! (get-identity identity-id) (err ERR-IDENTITY-NOT-FOUND)))
+      (provider-mapping (unwrap! (map-get? provider-principals { principal: tx-sender }) (err ERR-PROVIDER-NOT-FOUND)))
+      (provider-id (get provider-id provider-mapping))
+      (provider (unwrap! (get-provider provider-id) (err ERR-PROVIDER-NOT-FOUND)))
+    )
+    
+    ;; Check if provider is active
+    (asserts! (get is-active provider) (err ERR-NOT-AUTHORIZED))
+    
+    ;; Update reputation score
+    (match (map-get? reputation-scores { identity-id: identity-id, context: context })
+      existing-score
+      (let
+        (
+          (new-score (+ (get score existing-score) score-change))
+          (clamped-score (max (min new-score 100) 0))
+          (new-count (+ (get attestation-count existing-score) u1))
+        )
+        (map-set reputation-scores
+          { identity-id: identity-id, context: context }
+          {
+            score: clamped-score,
+            updated-at: block-height,
+            attestation-count: new-count,
+            confidence-score: (min (+ (get confidence-score existing-score) u5) u100),
+            proof-hash: (sha256 (concat (get proof-hash existing-score) attestation-proof))
+          }
+        )
+      )
+      ;; First attestation for this context
+      (begin
+        (map-set reputation-scores
+          { identity-id: identity-id, context: context }
+          {
+            score: (if (> score-change 0) (to-uint score-change) u50), ;; Default to 50 if negative
+            updated-at: block-height,
+            attestation-count: u1,
+            confidence-score: u10, ;; Initial confidence
+            proof-hash: (sha256 attestation-proof)
+          }
+        )
+      )
+    )
+    
+    (ok true)
+  )
+)
+
+;; Verify a credential with a provider
+(define-public (verify-credential (credential-id uint) (verification-proof (buff 512)))
+  (let
+    (
+      (credential (unwrap! (map-get? credentials { credential-id: credential-id }) (err ERR-CREDENTIAL-NOT-FOUND)))
+      (provider-mapping (unwrap! (map-get? provider-principals { principal: tx-sender }) (err ERR-PROVIDER-NOT-FOUND)))
+      (provider-id (get provider-id provider-mapping))
+      (verification-id (var-get next-verification-id))
+    )
+  ;; Check if credential is not already revoked
+    (asserts! (is-none (get revoked-at credential)) (err ERR-REVOKED-CREDENTIAL))
+    
+    ;; Check if credential is not expired
+    (match (get expires-at credential)
+      expiry (asserts! (< block-height expiry) (err ERR-EXPIRED-CREDENTIAL))
+      true
+    )
+    
+    ;; Create verification record
+    (map-set verifications
+      { verification-id: verification-id }
+      {
+        credential-id: credential-id,
+        verifier-id: provider-id,
+        verified-at: block-height,
+        verification-proof: verification-proof,
+        verification-status: VERIFICATION-STATUS-APPROVED,
+        verification-expiry: (some (+ block-height u10950)) ;; Valid for ~3 months (assuming ~1 block/min)
+      }
+    )
+    
+    ;; Increment verification ID
+    (var-set next-verification-id (+ verification-id u1))
+    
+    (ok verification-id)
+  )
+)
+
+;; Request disclosure of specific identity attributes
+;; This function simulates a request - in reality, this would trigger an off-chain flow
+(define-public (request-disclosure (identity-id uint) (requested-types (list 10 uint)))
+  (let
+    (
+      (identity (unwrap! (get-identity identity-id) (err ERR-IDENTITY-NOT-FOUND)))
+    )
+    
+    ;; Check if disclosure is authorized
+    (asserts! 
+      (fold check-all-types-authorized requested-types true)
+      (err ERR-DISCLOSURE-NOT-AUTHORIZED)
+    )
+    
+    ;; This would trigger an off-chain notification/flow
+    ;; Return success to simulate
+    (ok true)
+  )
+)
+
+;; Helper function to check if all requested types are authorized
+(define-private (check-all-types-authorized (credential-type uint) (all-authorized bool))
+  (if all-authorized
+    (is-disclosure-authorized identity-id tx-sender credential-type)
+    false
+  )
+)
+
+;; Transfer ownership of the contract
+(define-public (transfer-ownership (new-owner principal))
+  (begin
+    (asserts! (is-eq tx-sender (var-get contract-owner)) (err ERR-NOT-AUTHORIZED))
+    (var-set contract-owner new-owner)
+    (ok true)
+  )
+)
