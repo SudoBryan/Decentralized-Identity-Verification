@@ -265,3 +265,160 @@
     false
   )
 )
+;; Public functions
+
+;; Register a new identity provider
+(define-public (register-provider
+  (name (string-utf8 100))
+  (provider-public-key (buff 33))
+  (provider-url (string-utf8 255))
+  (provider-type (string-utf8 50))
+)
+  (let
+    (
+      (provider-id (var-get next-provider-id))
+    )
+    
+    ;; Only contract owner can register providers
+    (asserts! (is-eq tx-sender (var-get contract-owner)) (err ERR-NOT-AUTHORIZED))
+    
+    ;; Create provider record
+    (map-set identity-providers
+      { provider-id: provider-id }
+      {
+        name: name,
+        provider-principal: tx-sender,
+        provider-public-key: provider-public-key,
+        provider-url: provider-url,
+        trust-score: u50, ;; Default initial score
+        provider-type: provider-type,
+        is-active: true,
+        registered-at: block-height
+      }
+    )
+    
+    ;; Map provider principal to ID
+    (map-set provider-principals
+      { principal: tx-sender }
+      { provider-id: provider-id }
+    )
+    
+    ;; Increment provider ID
+    (var-set next-provider-id (+ provider-id u1))
+    
+    (ok provider-id)
+  )
+)
+
+;; Create a new digital identity
+(define-public (create-identity (identity-hash (buff 32)) (metadata-uri (optional (string-utf8 255))))
+  (let
+    (
+      (identity-id (var-get next-identity-id))
+    )
+    
+    ;; Check if principal already has an identity
+    (asserts! (is-none (map-get? principal-to-identity { principal: tx-sender })) (err ERR-ALREADY-EXISTS))
+    
+    ;; Create identity
+    (map-set identities
+      { identity-id: identity-id }
+      {
+        owner: tx-sender,
+        identity-hash: identity-hash,
+        created-at: block-height,
+        updated-at: block-height,
+        is-active: true,
+        verification-level: u1, ;; Initial level
+        metadata-uri: metadata-uri
+      }
+    )
+    
+    ;; Map principal to identity
+    (map-set principal-to-identity
+      { principal: tx-sender }
+      { identity-id: identity-id }
+    )
+    
+    ;; Increment identity ID
+    (var-set next-identity-id (+ identity-id u1))
+    
+    (ok identity-id)
+  )
+)
+
+;; Issue a credential to an identity
+(define-public (issue-credential
+  (identity-id uint)
+  (credential-type uint)
+  (credential-hash (buff 32))
+  (verification-proof (buff 512))
+  (expires-at (optional uint))
+)
+  (let
+    (
+      (credential-id (var-get next-credential-id))
+      (identity (unwrap! (get-identity identity-id) (err ERR-IDENTITY-NOT-FOUND)))
+      (provider-mapping (unwrap! (map-get? provider-principals { principal: tx-sender }) (err ERR-PROVIDER-NOT-FOUND)))
+      (provider-id (get provider-id provider-mapping))
+      (provider (unwrap! (get-provider provider-id) (err ERR-PROVIDER-NOT-FOUND)))
+    )
+    
+    ;; Check if provider is active
+    (asserts! (get is-active provider) (err ERR-NOT-AUTHORIZED))
+    
+    ;; Create credential
+    (map-set credentials
+      { credential-id: credential-id }
+      {
+        identity-id: identity-id,
+        credential-type: credential-type,
+        issuer-id: provider-id,
+        issued-at: block-height,
+        expires-at: expires-at,
+        revoked-at: none,
+        credential-hash: credential-hash,
+        verification-proof: verification-proof,
+        status: VERIFICATION-STATUS-APPROVED
+      }
+    )
+    
+    ;; Update credential count and index
+    (match (map-get? identity-credential-counts { identity-id: identity-id, credential-type: credential-type })
+      existing-count
+      (let
+        (
+          (new-count (+ (get count existing-count) u1))
+        )
+        ;; Update count
+        (map-set identity-credential-counts
+          { identity-id: identity-id, credential-type: credential-type }
+          { count: new-count }
+        )
+        
+        ;; Add to index
+        (map-set identity-credentials-by-type
+          { identity-id: identity-id, credential-type: credential-type, index: (- new-count u1) }
+          { credential-id: credential-id }
+        )
+      )
+      ;; First credential of this type
+      (begin
+        (map-set identity-credential-counts
+          { identity-id: identity-id, credential-type: credential-type }
+          { count: u1 }
+        )
+        
+        (map-set identity-credentials-by-type
+          { identity-id: identity-id, credential-type: credential-type, index: u0 }
+          { credential-id: credential-id }
+        )
+      )
+    )
+    
+    ;; Increment credential ID
+    (var-set next-credential-id (+ credential-id u1))
+    
+    (ok credential-id)
+  )
+)
