@@ -108,6 +108,7 @@ Clarinet.test({
         ],
         randomUser.address
       )
+
     ]);
     
     // Check that provider registration failed
