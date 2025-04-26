@@ -346,3 +346,433 @@ Clarinet.test({
         deployer.address // Provider who issued the credential
       )
     ]);
+     // Check that revocation succeeded
+     assertEquals(revokeBlock.receipts.length, 1);
+     assertEquals(revokeBlock.receipts[0].result, '(ok true)');
+     
+     // Check credential is no longer valid after revocation
+     let validityAfterRevoke = chain.callReadOnlyFn(
+       'decentralized-identity-verification',
+       'is-credential-valid',
+       [types.uint(1)],
+       deployer.address
+     );
+     
+     assertEquals(validityAfterRevoke.result, types.bool(false));
+   },
+ });
+ 
+ Clarinet.test({
+   name: "Can manage selective disclosure authorizations",
+   async fn(chain: Chain, accounts: Map<string, Account>) {
+     const deployer = accounts.get('deployer')!;
+     const user1 = accounts.get('wallet_1')!;
+     const verifier = accounts.get('wallet_2')!;
+     
+     // Setup - Create identity
+     let setupBlock = chain.mineBlock([
+       // Create identity
+       Tx.contractCall(
+         'decentralized-identity-verification',
+         'create-identity',
+         [
+           types.buff(new Uint8Array(32).fill(2)), // Identity hash (mock)
+           types.some(types.utf8("ipfs://QmHash")), // Metadata URI
+         ],
+         user1.address
+       )
+     ]);
+     
+     // User authorizes disclosure of certain credential types to a verifier
+     let authorizeBlock = chain.mineBlock([
+       Tx.contractCall(
+         'decentralized-identity-verification',
+         'authorize-disclosure',
+         [
+           types.uint(1), // identity-id
+           types.principal(verifier.address), // authorized-principal
+           types.list([
+             types.uint(CREDENTIAL_TYPE_AGE),
+             types.uint(CREDENTIAL_TYPE_EDUCATION)
+           ]), // authorized-types
+           types.some(types.uint(100000)), // expires-at
+           types.buff(new Uint8Array(128).fill(6)), // authorization-proof
+         ],
+         user1.address // Identity owner
+       )
+     ]);
+     
+     // Check that authorization succeeded
+     assertEquals(authorizeBlock.receipts.length, 1);
+     assertEquals(authorizeBlock.receipts[0].result, '(ok true)');
+     
+     // Check if disclosure is authorized for specific types
+     let ageAuthCheck = chain.callReadOnlyFn(
+       'decentralized-identity-verification',
+       'is-disclosure-authorized',
+       [
+         types.uint(1), // identity-id
+         types.principal(verifier.address), // requestor
+         types.uint(CREDENTIAL_TYPE_AGE), // credential-type
+       ],
+       deployer.address
+     );
+     
+     assertEquals(ageAuthCheck.result, types.bool(true));
+     
+     // Check if unauthorized type is correctly rejected
+     let healthAuthCheck = chain.callReadOnlyFn(
+       'decentralized-identity-verification',
+       'is-disclosure-authorized',
+       [
+         types.uint(1), // identity-id
+         types.principal(verifier.address), // requestor
+         types.uint(CREDENTIAL_TYPE_HEALTH), // credential-type (not authorized)
+       ],
+       deployer.address
+     );
+     
+     assertEquals(healthAuthCheck.result, types.bool(false));
+     
+     // Revoke the authorization
+     let revokeBlock = chain.mineBlock([
+       Tx.contractCall(
+         'decentralized-identity-verification',
+         'revoke-disclosure-authorization',
+         [
+           types.uint(1), // identity-id
+           types.principal(verifier.address), // authorized-principal
+         ],
+         user1.address // Identity owner
+       )
+     ]);
+     
+     // Check that revocation succeeded
+     assertEquals(revokeBlock.receipts.length, 1);
+     assertEquals(revokeBlock.receipts[0].result, '(ok true)');
+     
+     // Verify authorization is revoked
+     let ageAuthCheckAfterRevoke = chain.callReadOnlyFn(
+       'decentralized-identity-verification',
+       'is-disclosure-authorized',
+       [
+         types.uint(1), // identity-id
+         types.principal(verifier.address), // requestor
+         types.uint(CREDENTIAL_TYPE_AGE), // credential-type
+       ],
+       deployer.address
+     );
+     
+     assertEquals(ageAuthCheckAfterRevoke.result, types.bool(false));
+   },
+ });
+ 
+ Clarinet.test({
+   name: "Can commit and verify attributes",
+   async fn(chain: Chain, accounts: Map<string, Account>) {
+     const deployer = accounts.get('deployer')!;
+     const user1 = accounts.get('wallet_1')!;
+     
+     // Setup - Create identity
+     let setupBlock = chain.mineBlock([
+       // Create identity
+       Tx.contractCall(
+         'decentralized-identity-verification',
+         'create-identity',
+         [
+           types.buff(new Uint8Array(32).fill(2)), // Identity hash (mock)
+           types.some(types.utf8("ipfs://QmHash")), // Metadata URI
+         ],
+         user1.address
+       )
+     ]);
+     
+     // Commit an attribute (e.g., hashed address)
+     let attributeHash = new Uint8Array(32).fill(7);
+     let commitBlock = chain.mineBlock([
+       Tx.contractCall(
+         'decentralized-identity-verification',
+         'commit-attribute',
+         [
+           types.uint(1), // identity-id
+           types.ascii("home_address"), // attribute-name
+           types.buff(attributeHash), // attribute-hash
+           types.buff(new Uint8Array(64).fill(8)), // commitment
+           types.buff(new Uint8Array(32).fill(9)), // salt
+         ],
+         user1.address // Identity owner
+       )
+     ]);
+     
+     // Check that commitment succeeded
+     assertEquals(commitBlock.receipts.length, 1);
+     assertEquals(commitBlock.receipts[0].result, '(ok true)');
+     
+     // Verify attribute match (should be true)
+     let matchCheckTrue = chain.callReadOnlyFn(
+       'decentralized-identity-verification',
+       'verify-attribute-match',
+       [
+         types.uint(1), // identity-id
+         types.ascii("home_address"), // attribute-name
+         types.buff(attributeHash), // expected-hash (matching)
+       ],
+       deployer.address
+     );
+     
+     assertEquals(matchCheckTrue.result, types.bool(true));
+     
+     // Verify attribute mismatch (should be false)
+     let wrongHash = new Uint8Array(32).fill(10);
+     let matchCheckFalse = chain.callReadOnlyFn(
+       'decentralized-identity-verification',
+       'verify-attribute-match',
+       [
+         types.uint(1), // identity-id
+         types.ascii("home_address"), // attribute-name
+         types.buff(wrongHash), // expected-hash (non-matching)
+       ],
+       deployer.address
+     );
+     
+     assertEquals(matchCheckFalse.result, types.bool(false));
+   },
+ });
+ 
+ Clarinet.test({
+   name: "Can submit and query reputation attestations",
+   async fn(chain: Chain, accounts: Map<string, Account>) {
+     const deployer = accounts.get('deployer')!;
+     const user1 = accounts.get('wallet_1')!;
+     
+     // Setup - Register provider and create identity
+     let setupBlock = chain.mineBlock([
+       // Register provider
+       Tx.contractCall(
+         'decentralized-identity-verification',
+         'register-provider',
+         [
+           types.utf8("Reputation Authority"),
+           types.buff(new Uint8Array(33).fill(1)), // Public key (mock)
+           types.utf8("https://rep.example.com"),
+           types.utf8("reputation"),
+         ],
+         deployer.address
+       ),
+       // Create identity
+       Tx.contractCall(
+         'decentralized-identity-verification',
+         'create-identity',
+         [
+           types.buff(new Uint8Array(32).fill(2)), // Identity hash (mock)
+           types.some(types.utf8("ipfs://QmHash")), // Metadata URI
+         ],
+         user1.address
+       )
+     ]);
+     
+     // Submit a positive reputation attestation
+     let attestBlock = chain.mineBlock([
+       Tx.contractCall(
+         'decentralized-identity-verification',
+         'submit-reputation-attestation',
+         [
+           types.uint(1), // identity-id
+           types.utf8("marketplace"), // context
+           types.int(10), // score-change (positive)
+           types.buff(new Uint8Array(128).fill(11)), // attestation-proof
+         ],
+         deployer.address // Provider is the attestor
+       )
+     ]);
+     
+     // Check that attestation succeeded
+     assertEquals(attestBlock.receipts.length, 1);
+     assertEquals(attestBlock.receipts[0].result, '(ok true)');
+     
+     // Query reputation score
+     let reputationCall = chain.callReadOnlyFn(
+       'decentralized-identity-verification',
+       'get-reputation',
+       [
+         types.uint(1), // identity-id
+         types.utf8("marketplace"), // context
+       ],
+       deployer.address
+     );
+     
+     let reputation = reputationCall.result.expectSome().expectTuple();
+     assertEquals(reputation.score, types.uint(10)); // Should be 10 from our attestation
+     assertEquals(reputation['attestation-count'], types.uint(1)); // One attestation so far
+     
+     // Submit another attestation
+     let attestBlock2 = chain.mineBlock([
+       Tx.contractCall(
+         'decentralized-identity-verification',
+         'submit-reputation-attestation',
+         [
+           types.uint(1), // identity-id
+           types.utf8("marketplace"), // context
+           types.int(5), // score-change (another positive)
+           types.buff(new Uint8Array(128).fill(12)), // attestation-proof
+         ],
+         deployer.address // Provider is the attestor
+       )
+     ]);
+     
+     // Query updated reputation score
+     let updatedReputationCall = chain.callReadOnlyFn(
+       'decentralized-identity-verification',
+       'get-reputation',
+       [
+         types.uint(1), // identity-id
+         types.utf8("marketplace"), // context
+       ],
+       deployer.address
+     );
+     
+     let updatedReputation = updatedReputationCall.result.expectSome().expectTuple();
+     assertEquals(updatedReputation.score, types.uint(15)); // Should be 10 + 5 = 15
+     assertEquals(updatedReputation['attestation-count'], types.uint(2)); // Two attestations now
+   },
+ });
+ 
+ Clarinet.test({
+   name: "Can verify credentials with another provider",
+   async fn(chain: Chain, accounts: Map<string, Account>) {
+     const deployer = accounts.get('deployer')!; // First provider
+     const secondProvider = accounts.get('wallet_2')!;
+     const user1 = accounts.get('wallet_1')!;
+     
+     // Setup - Register providers, create identity, issue credential
+     let setupBlock = chain.mineBlock([
+       // Register first provider
+       Tx.contractCall(
+         'decentralized-identity-verification',
+         'register-provider',
+         [
+           types.utf8("Primary Authority"),
+           types.buff(new Uint8Array(33).fill(1)), // Public key (mock)
+           types.utf8("https://primary.example.com"),
+           types.utf8("government"),
+         ],
+         deployer.address
+       ),
+       // Register second provider
+       Tx.contractCall(
+         'decentralized-identity-verification',
+         'register-provider',
+         [
+           types.utf8("Secondary Verifier"),
+           types.buff(new Uint8Array(33).fill(2)), // Public key (mock)
+           types.utf8("https://secondary.example.com"),
+           types.utf8("commercial"),
+         ],
+         secondProvider.address // Note: this would normally be done by deployer/owner
+       ),
+       // Create identity
+       Tx.contractCall(
+         'decentralized-identity-verification',
+         'create-identity',
+         [
+           types.buff(new Uint8Array(32).fill(2)), // Identity hash (mock)
+           types.some(types.utf8("ipfs://QmHash")), // Metadata URI
+         ],
+         user1.address
+       ),
+       // Primary provider issues a credential
+       Tx.contractCall(
+         'decentralized-identity-verification',
+         'issue-credential',
+         [
+           types.uint(1), // identity-id
+           types.uint(CREDENTIAL_TYPE_GOVERNMENT_ID), // credential-type
+           types.buff(new Uint8Array(32).fill(3)), // credential-hash
+           types.buff(new Uint8Array(512).fill(4)), // verification-proof
+           types.some(types.uint(100000)), // expires-at
+         ],
+         deployer.address // First provider issues
+       )
+     ]);
+     
+     // Second provider verifies the credential
+     let verifyBlock = chain.mineBlock([
+       Tx.contractCall(
+         'decentralized-identity-verification',
+         'verify-credential',
+         [
+           types.uint(1), // credential-id
+           types.buff(new Uint8Array(512).fill(13)), // verification-proof
+         ],
+         secondProvider.address // Second provider verifies
+       )
+     ]);
+     
+     // Check that verification succeeded
+     assertEquals(verifyBlock.receipts.length, 1);
+     assertEquals(verifyBlock.receipts[0].result, '(ok u1)'); // First verification ID is 1
+   },
+ });
+ 
+ Clarinet.test({
+   name: "Enforces owner-only identity operations",
+   async fn(chain: Chain, accounts: Map<string, Account>) {
+     const deployer = accounts.get('deployer')!;
+     const user1 = accounts.get('wallet_1')!;
+     const attacker = accounts.get('wallet_3')!;
+     
+     // Setup - Create identity
+     let setupBlock = chain.mineBlock([
+       // Create identity
+       Tx.contractCall(
+         'decentralized-identity-verification',
+         'create-identity',
+         [
+           types.buff(new Uint8Array(32).fill(2)), // Identity hash (mock)
+           types.some(types.utf8("ipfs://QmHash")), // Metadata URI
+         ],
+         user1.address
+       )
+     ]);
+     
+     // Attacker tries to commit an attribute to user1's identity
+     let attackBlock = chain.mineBlock([
+       Tx.contractCall(
+         'decentralized-identity-verification',
+         'commit-attribute',
+         [
+           types.uint(1), // identity-id
+           types.ascii("compromised_data"), // attribute-name
+           types.buff(new Uint8Array(32).fill(7)), // attribute-hash
+           types.buff(new Uint8Array(64).fill(8)), // commitment
+           types.buff(new Uint8Array(32).fill(9)), // salt
+         ],
+         attacker.address // Attacker, not the identity owner
+       )
+     ]);
+     
+     // Check that the operation failed due to not being authorized
+     assertEquals(attackBlock.receipts.length, 1);
+     assertEquals(attackBlock.receipts[0].result, `(err u${ERR_NOT_AUTHORIZED})`);
+     
+     // Attacker tries to authorize disclosure on user1's identity
+     let attackBlock2 = chain.mineBlock([
+       Tx.contractCall(
+         'decentralized-identity-verification',
+         'authorize-disclosure',
+         [
+           types.uint(1), // identity-id
+           types.principal(attacker.address), // authorized-principal
+           types.list([types.uint(CREDENTIAL_TYPE_FINANCIAL)]), // authorized-types
+           types.none(), // expires-at
+           types.buff(new Uint8Array(128).fill(6)), // authorization-proof
+         ],
+         attacker.address // Attacker, not the identity owner
+       )
+     ]);
+     
+     // Check that the operation failed due to not being authorized
+     assertEquals(attackBlock2.receipts.length, 1);
+     assertEquals(attackBlock2.receipts[0].result, `(err u${ERR_NOT_AUTHORIZED})`);
+   },
+ });
